@@ -3,6 +3,7 @@ EXSS Device Test Recording System
 Records pass/fail test results for Base Module, Top Module, and PCBA devices.
 """
 import os
+import re
 import sys
 import base64
 import configparser
@@ -45,12 +46,12 @@ PCBA_TESTS = BASE_MODULE_TESTS   # same columns as base module
 
 # --- Top Module table -------------------------------------------------------
 TBL_TOP          = "exs_test"          # <-- table name
-COL_TOP_SN       = "top_module_sn"     # <-- serial number column (primary key)
+COL_TOP_SN       = "device_sn"         # <-- serial number column (primary key)
 COL_TOP_HORN_VOL = "horn_volume_dba"   # <-- horn volume column (float, dBA)
 
 # --- Base Module table ------------------------------------------------------
 TBL_BASE         = "exb_test"          # <-- table name
-COL_BASE_SN      = "base_module_sn"    # <-- serial number column (primary key)
+COL_BASE_SN      = "device_sn"         # <-- serial number column (primary key)
 
 # --- PCBA table -------------------------------------------------------------
 TBL_PCBA         = "exss_pcba_test"    # <-- table name
@@ -75,8 +76,8 @@ PCBA_VOLTAGE_RAILS = [
 
 # Serial number field labels per unit type
 SN_LABELS = {
-    "Base Module":  "Base Module Device ID",
-    "Top Module": "Top Module Device ID",
+    "Base Module":  "Main PCBA S/N",
+    "Top Module": "Horn Serial Number",
     "PCBA":       "Main PCBA S/N",
 }
 
@@ -142,11 +143,11 @@ def _to_tinyint(val: str):
 
 
 def _replace_into(cursor, table: str, columns: list, values: list):
-    """Build and execute a REPLACE INTO statement with backtick-quoted names."""
+    """Build and execute an INSERT INTO statement with backtick-quoted names."""
     col_str      = ", ".join(f"`{c}`" for c in columns)
     placeholders = ", ".join(["%s"] * len(columns))
     cursor.execute(
-        f"REPLACE INTO `{table}` ({col_str}) VALUES ({placeholders})",
+        f"INSERT INTO `{table}` ({col_str}) VALUES ({placeholders})",
         values,
     )
 
@@ -453,6 +454,16 @@ class TestApp:
                                        f'"{val}" is not a valid number for Horn Volume.')
                 return False
 
+        # PCBA S/N format: BLN-XXXX-XXXXXXXXRX
+        if unit == "PCBA":
+            pcba_sn = self._sn_var.get().strip()
+            if not re.fullmatch(r"BLN-\d{4}-\d{8}R\d+", pcba_sn):
+                messagebox.showwarning("Invalid S/N",
+                                       f'"{pcba_sn}" is not a valid PCBA serial number.\n'
+                                       "Expected format: BLN-XXXX-XXXXXXXXRX\n"
+                                       "Example: BLN-3724-94001026R3")
+                return False
+
         # Voltage rails required for PCBA
         for lbl, col in PCBA_VOLTAGE_RAILS if unit == "PCBA" else []:
             val = self._voltage_vars[col].get().strip()
@@ -598,9 +609,9 @@ class TestApp:
         yy = datetime.now().strftime("%y")
 
         if unit == "Base Module":
-            type_prefix, sn_col, table = "EXB", "base_module_sn", TBL_BASE_ASSEMBLY
+            type_prefix, sn_col, table = "EXB", "device_sn", TBL_BASE_ASSEMBLY
         else:
-            type_prefix, sn_col, table = "EXS", "top_module_sn", TBL_TOP_ASSEMBLY
+            type_prefix, sn_col, table = "EXS", "device_sn", TBL_TOP_ASSEMBLY
 
         # Use '_' wildcard to match any material letter, keeping a shared sequence
         cursor.execute(
@@ -627,7 +638,7 @@ class TestApp:
         conn = mysql.connector.connect(**self._db_config)
         assigned_serial = None
         try:
-            cur  = conn.cursor()
+            cur  = conn.cursor(buffered=True)
             unit = self._unit_var.get()
             sn   = self._sn_var.get().strip()
 
@@ -635,73 +646,99 @@ class TestApp:
             overall = 0 if self._collect_failures() else 1
 
             if unit == "Base Module":
-                cols = [COL_BASE_SN] + [col for _, col in BASE_MODULE_TESTS] + ["test_result"]
-                vals = ([sn]
+                pcba_sn = sn  # operator-entered PCBA serial number
+
+                # Look up device_id, material, and existing device_sn from assembly table by PCBA serial
+                cur.execute(
+                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_BASE_ASSEMBLY}` WHERE `main_pcba` = %s",
+                    (pcba_sn,),
+                )
+                asm_row = cur.fetchone()
+                if not asm_row:
+                    raise ValueError(
+                        f"PCBA serial '{pcba_sn}' was not found in {TBL_BASE_ASSEMBLY}.\n"
+                        "Please check the PCBA serial number."
+                    )
+                device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                if not material_code:
+                    raise ValueError(
+                        f"No material is set for PCBA serial '{pcba_sn}' in {TBL_BASE_ASSEMBLY}.\n"
+                        "Please set the material before submitting test results."
+                    )
+
+                cols = ["device_id"] + [col for _, col in BASE_MODULE_TESTS] + ["test_result"]
+                vals = ([device_id]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in BASE_MODULE_TESTS]
                         + [overall])
                 _replace_into(cur, TBL_BASE, cols, vals)
 
                 if overall == 1:
-                    cur.execute(
-                        f"SELECT `material` FROM `{TBL_BASE_ASSEMBLY}` WHERE `device_id` = %s",
-                        (sn,),
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        raise ValueError(
-                            f"Device ID '{sn}' was not found in {TBL_BASE_ASSEMBLY}.\n"
-                            "Serial number could not be assigned. No data was saved."
+                    if existing_sn:
+                        serial = existing_sn
+                    else:
+                        serial = self._next_serial(cur, unit, material_code)
+                        cur.execute(
+                            f"UPDATE `{TBL_BASE_ASSEMBLY}` "
+                            f"SET `device_sn` = %s, `date_modified` = NOW() "
+                            f"WHERE `main_pcba` = %s",
+                            (serial, pcba_sn),
                         )
-                    material_code = row[0]
-                    if not material_code:
-                        raise ValueError(
-                            f"No material is set for Device ID '{sn}' in {TBL_BASE_ASSEMBLY}.\n"
-                            "Please set the material before submitting test results."
-                        )
-                    serial = self._next_serial(cur, unit, material_code)
                     cur.execute(
-                        f"UPDATE `{TBL_BASE_ASSEMBLY}` "
-                        f"SET `base_module_sn` = %s, `date_modified` = NOW() "
-                        f"WHERE `device_id` = %s",
-                        (serial, sn),
+                        "UPDATE `device` "
+                        "SET `date_of_manufacture` = NOW() "
+                        "WHERE `device_id` = %s",
+                        (device_id,),
                     )
                     assigned_serial = serial
 
             elif unit == "Top Module":
+                horn_sn = sn  # operator-entered horn serial number
+
+                # Look up device_id, material, and existing device_sn from assembly table by horn serial
+                cur.execute(
+                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_TOP_ASSEMBLY}` WHERE `horn_sn` = %s",
+                    (horn_sn,),
+                )
+                asm_row = cur.fetchone()
+                if not asm_row:
+                    raise ValueError(
+                        f"Horn serial '{horn_sn}' was not found in {TBL_TOP_ASSEMBLY}.\n"
+                        "Please check the horn serial number."
+                    )
+                device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                if not material_code:
+                    raise ValueError(
+                        f"No material is set for horn serial '{horn_sn}' in {TBL_TOP_ASSEMBLY}.\n"
+                        "Please set the material before submitting test results."
+                    )
+
                 horn_vol_str = self._horn_vol_var.get().strip()
-                cols = ([COL_TOP_SN]
+                cols = (["device_id"]
                         + [col for _, col in TOP_MODULE_TESTS]
                         + [COL_TOP_HORN_VOL, "test_result"])
-                vals = ([sn]
+                vals = ([device_id]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in TOP_MODULE_TESTS]
                         + [float(horn_vol_str), overall])
                 _replace_into(cur, TBL_TOP, cols, vals)
 
                 if overall == 1:
-                    cur.execute(
-                        f"SELECT `material` FROM `{TBL_TOP_ASSEMBLY}` WHERE `device_id` = %s",
-                        (sn,),
-                    )
-                    row = cur.fetchone()
-                    if not row:
-                        raise ValueError(
-                            f"Device ID '{sn}' was not found in {TBL_TOP_ASSEMBLY}.\n"
-                            "Serial number could not be assigned. No data was saved."
+                    if existing_sn:
+                        serial = existing_sn
+                    else:
+                        serial = self._next_serial(cur, unit, material_code)
+                        cur.execute(
+                            f"UPDATE `{TBL_TOP_ASSEMBLY}` "
+                            f"SET `device_sn` = %s, `date_modified` = NOW() "
+                            f"WHERE `horn_sn` = %s",
+                            (serial, horn_sn),
                         )
-                    material_code = row[0]
-                    if not material_code:
-                        raise ValueError(
-                            f"No material is set for Device ID '{sn}' in {TBL_TOP_ASSEMBLY}.\n"
-                            "Please set the material before submitting test results."
-                        )
-                    serial = self._next_serial(cur, unit, material_code)
                     cur.execute(
-                        f"UPDATE `{TBL_TOP_ASSEMBLY}` "
-                        f"SET `top_module_sn` = %s, `date_modified` = NOW() "
-                        f"WHERE `device_id` = %s",
-                        (serial, sn),
+                        "UPDATE `device` "
+                        "SET `date_of_manufacture` = NOW() "
+                        "WHERE `device_id` = %s",
+                        (device_id,),
                     )
                     assigned_serial = serial
 
