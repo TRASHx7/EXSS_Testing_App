@@ -650,7 +650,8 @@ class TestApp:
 
                 # Look up device_id, material, and existing device_sn from assembly table by PCBA serial
                 cur.execute(
-                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_BASE_ASSEMBLY}` WHERE `main_pcba` = %s",
+                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_BASE_ASSEMBLY}` "
+                    f"WHERE `main_pcba` = %s ORDER BY `device_id` DESC LIMIT 1",
                     (pcba_sn,),
                 )
                 asm_row = cur.fetchone()
@@ -697,7 +698,8 @@ class TestApp:
 
                 # Look up device_id, material, and existing device_sn from assembly table by horn serial
                 cur.execute(
-                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_TOP_ASSEMBLY}` WHERE `horn_sn` = %s",
+                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_TOP_ASSEMBLY}` "
+                    f"WHERE `horn_sn` = %s ORDER BY `device_id` DESC LIMIT 1",
                     (horn_sn,),
                 )
                 asm_row = cur.fetchone()
