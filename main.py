@@ -55,7 +55,7 @@ COL_BASE_SN      = "device_sn"         # <-- serial number column (primary key)
 
 # --- PCBA table -------------------------------------------------------------
 TBL_PCBA         = "exss_pcba_test"    # <-- table name
-COL_PCBA_SN      = "main_pcba_sn"      # <-- serial number column (primary key)
+COL_PCBA_SN      = "main_pcba"         # <-- serial number column (primary key)
 COL_PCBA_24V     = "24v0_rail_v"       # <-- 24 V rail voltage column (float)
 COL_PCBA_3V3     = "3v3_rail_v"        # <-- 3.3 V rail voltage column (float)
 COL_PCBA_12V     = "12v0_rail_v"       # <-- 12 V rail voltage column (float)
