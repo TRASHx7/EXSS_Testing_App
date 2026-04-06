@@ -2,6 +2,7 @@
 EXSS Device Test Recording System
 Records pass/fail test results for Base Module, Top Module, and PCBA devices.
 """
+import csv
 import os
 import re
 import sys
@@ -130,6 +131,10 @@ def load_limits() -> configparser.ConfigParser:
     return cfg
 
 
+def _safe_config_value(cfg: configparser.ConfigParser, section: str, key: str) -> str:
+    return cfg.get(section, key, fallback="").strip()
+
+
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
@@ -150,6 +155,66 @@ def _replace_into(cursor, table: str, columns: list, values: list):
         f"INSERT INTO `{table}` ({col_str}) VALUES ({placeholders})",
         values,
     )
+
+
+def _csv_file_name(unit: str) -> str:
+    prefix = "EXB" if unit == "Base Module" else "EXS"
+    now = datetime.now()
+    hundredths = now.microsecond // 10000
+    return f"{prefix}{now.strftime('%Y%m%d%H%M%S')}{hundredths:02d}.csv"
+
+
+def _write_printer_csv(unit: str, device_id: int, limits: configparser.ConfigParser, device_sn: str = "") -> None:
+    section = "exb_printer" if unit == "Base Module" else "exs_printer"
+    if not limits.has_section(section):
+        raise ValueError(f"Missing printer section '{section}' in config.ini")
+
+    name = _safe_config_value(limits, section, "exb_name" if unit == "Base Module" else "exs_name")
+    description1 = _safe_config_value(limits, section, "exb_description1" if unit == "Base Module" else "exs_description1")
+    description2 = _safe_config_value(limits, section, "exb_description2" if unit == "Base Module" else "exs_description2")
+    printer = _safe_config_value(limits, section, "printer")
+    quantity = _safe_config_value(limits, section, "quantity")
+
+    if description2.upper() == "NA":
+        description2 = ""
+
+    output_dir = "S:\\"
+    if not os.path.isdir(output_dir):
+        raise FileNotFoundError(f"Output directory not available: {output_dir}")
+
+    file_path = os.path.join(output_dir, _csv_file_name(unit))
+    headers = [
+        "deviceSN",
+        "name",
+        "description1",
+        "description2",
+        "date",
+        "deviceID",
+        "certification",
+        "image",
+        "Label",
+        "Printer",
+        "Quantity",
+    ]
+    now = datetime.now()
+    row = [
+        device_sn,
+        name,
+        description1,
+        description2,
+        f"{now.month}/{now.day}/{now.year}",
+        str(device_id),
+        "",
+        "",
+        "",
+        printer,
+        quantity,
+    ]
+
+    with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(headers)
+        writer.writerow(row)
 
 
 # ---------------------------------------------------------------------------
@@ -559,7 +624,7 @@ class TestApp:
             return
 
         try:
-            assigned_serial = self._save_to_db()
+            assigned_serial, device_id = self._save_to_db()
         except ValueError as exc:
             messagebox.showerror("Assembly Lookup Error", str(exc))
             return
@@ -588,6 +653,13 @@ class TestApp:
             text="Saved at " + datetime.now().strftime("%H:%M:%S"),
             fg="#2E7D32",
         )
+        try:
+            if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None:
+                _write_printer_csv(self._unit_var.get(), device_id, self._limits, assigned_serial or "")
+        except Exception as exc:
+            messagebox.showerror("CSV Error",
+                                 f"Test results saved, but failed to create CSV file:\n{exc}")
+
         # Reset field values but stay on the same unit type page
         self._sn_var.set("")
         self._horn_vol_var.set("")
@@ -628,15 +700,17 @@ class TestApp:
     # ------------------------------------------------------------------
     # Database write  –  one REPLACE INTO per unit type
     # ------------------------------------------------------------------
-    def _save_to_db(self) -> str | None:
+    def _save_to_db(self) -> tuple[str | None, int | None]:
         """Save test results and assign a serial number for passing Base/Top tests.
 
-        Returns the assigned serial string, or None for PCBA or failing tests.
+        Returns the assigned serial string and the device_id for EXB/EXS.
+        For PCBA or failing tests, the serial may be None and device_id may be None.
         Raises ValueError if the device_id is not found in the assembly table
         (the entire transaction is rolled back in that case).
         """
         conn = mysql.connector.connect(**self._db_config)
         assigned_serial = None
+        assigned_device_id = None
         try:
             cur  = conn.cursor(buffered=True)
             unit = self._unit_var.get()
@@ -661,6 +735,7 @@ class TestApp:
                         "Please check the PCBA serial number."
                     )
                 device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                assigned_device_id = device_id
                 if not material_code:
                     raise ValueError(
                         f"No material is set for PCBA serial '{pcba_sn}' in {TBL_BASE_ASSEMBLY}.\n"
@@ -682,8 +757,8 @@ class TestApp:
                         cur.execute(
                             f"UPDATE `{TBL_BASE_ASSEMBLY}` "
                             f"SET `device_sn` = %s, `date_modified` = NOW() "
-                            f"WHERE `main_pcba` = %s",
-                            (serial, pcba_sn),
+                            f"WHERE `device_id` = %s",
+                            (serial, device_id),
                         )
                     cur.execute(
                         "UPDATE `device` "
@@ -709,6 +784,7 @@ class TestApp:
                         "Please check the horn serial number."
                     )
                 device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                assigned_device_id = device_id
                 if not material_code:
                     raise ValueError(
                         f"No material is set for horn serial '{horn_sn}' in {TBL_TOP_ASSEMBLY}.\n"
@@ -733,8 +809,8 @@ class TestApp:
                         cur.execute(
                             f"UPDATE `{TBL_TOP_ASSEMBLY}` "
                             f"SET `device_sn` = %s, `date_modified` = NOW() "
-                            f"WHERE `horn_sn` = %s",
-                            (serial, horn_sn),
+                            f"WHERE `device_id` = %s",
+                            (serial, device_id),
                         )
                     cur.execute(
                         "UPDATE `device` "
@@ -758,7 +834,7 @@ class TestApp:
                 _replace_into(cur, TBL_PCBA, cols, vals)
 
             conn.commit()
-            return assigned_serial
+            return assigned_serial, assigned_device_id
 
         except Exception:
             conn.rollback()
