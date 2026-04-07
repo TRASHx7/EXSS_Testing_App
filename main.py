@@ -164,19 +164,43 @@ def _csv_file_name(unit: str) -> str:
     return f"{prefix}{now.strftime('%Y%m%d%H%M%S')}{hundredths:02d}.csv"
 
 
-def _write_printer_csv(unit: str, device_id: int, limits: configparser.ConfigParser, device_sn: str = "") -> None:
-    section = "exb_printer" if unit == "Base Module" else "exs_printer"
-    if not limits.has_section(section):
-        raise ValueError(f"Missing printer section '{section}' in config.ini")
+def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: str = "") -> None:
+    # Look up product info and printer config from the database
+    product_id = 68 if unit == "Base Module" else 71
+    name = ""
+    description1 = ""
+    printer = ""
+    label = ""
+    conn = mysql.connector.connect(**db_config)
+    try:
+        cur = conn.cursor(buffered=True)
+        cur.execute(
+            "SELECT `current_hw_model`, `model_description` "
+            "FROM `product` "
+            "WHERE `product_id` = %s "
+            "LIMIT 1",
+            (product_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            name         = row[0] or ""
+            description1 = row[1] or ""
 
-    name = _safe_config_value(limits, section, "exb_name" if unit == "Base Module" else "exs_name")
-    description1 = _safe_config_value(limits, section, "exb_description1" if unit == "Base Module" else "exs_description1")
-    description2 = _safe_config_value(limits, section, "exb_description2" if unit == "Base Module" else "exs_description2")
-    printer = _safe_config_value(limits, section, "printer")
-    quantity = _safe_config_value(limits, section, "quantity")
+        cur.execute(
+            "SELECT `printer_name`, `label_file_name` "
+            "FROM `printer_config` "
+            "WHERE `product_id` = %s "
+            "LIMIT 1",
+            (product_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            printer = row[0] or ""
+            label   = row[1] or ""
+    finally:
+        conn.close()
 
-    if description2.upper() == "NA":
-        description2 = ""
+    description2 = ""
 
     output_dir = "S:\\"
     if not os.path.isdir(output_dir):
@@ -197,7 +221,7 @@ def _write_printer_csv(unit: str, device_id: int, limits: configparser.ConfigPar
         "Quantity",
     ]
     now = datetime.now()
-    row = [
+    csv_row = [
         device_sn,
         name,
         description1,
@@ -206,15 +230,15 @@ def _write_printer_csv(unit: str, device_id: int, limits: configparser.ConfigPar
         str(device_id),
         "",
         "",
-        "",
+        label,
         printer,
-        quantity,
+        "1",
     ]
 
     with open(file_path, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(headers)
-        writer.writerow(row)
+        writer.writerow(csv_row)
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +679,7 @@ class TestApp:
         )
         try:
             if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None:
-                _write_printer_csv(self._unit_var.get(), device_id, self._limits, assigned_serial or "")
+                _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "")
         except Exception as exc:
             messagebox.showerror("CSV Error",
                                  f"Test results saved, but failed to create CSV file:\n{exc}")
