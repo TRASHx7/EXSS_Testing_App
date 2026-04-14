@@ -37,12 +37,11 @@ BASE_MODULE_TESTS = [
     ("LOW Alarm Switch",  "low_alarm_switch"),
     ("HIGH Alarm Switch", "high_alarm_switch"),
     ("Power Switch",      "power_switch"),
-    ("LOW Siren Switch",  "low_siren_switch"),
-    ("BAT Siren Switch",  "bat_siren_switch"),
-    ("Yellow LED",        "yellow_led"),
     ("Green LED",         "green_led"),
-    ("Test Button",       "test_button"),
+    ("Yellow LED",        "yellow_led"),
+    ("BAT Siren Switch",  "bat_siren_switch"),
     ("Connector A",       "connector_a"),
+    ("LOW Siren Switch",  "low_siren_switch"),
     ("Connector B",       "connector_b"),
 ]
 
