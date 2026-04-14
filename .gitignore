@@ -32,6 +32,9 @@ MANIFEST
 *.manifest
 *.spec
 
+# Database credentials – never commit these
+db_config.ini
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
