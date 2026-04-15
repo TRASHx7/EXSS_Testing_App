@@ -40,6 +40,7 @@ BASE_MODULE_TESTS = [
     ("Green LED",         "green_led"),
     ("Yellow LED",        "yellow_led"),
     ("BAT Siren Switch",  "bat_siren_switch"),
+    ("Test Button",       "test_button"),
     ("Connector A",       "connector_a"),
     ("LOW Siren Switch",  "low_siren_switch"),
     ("Connector B",       "connector_b"),
