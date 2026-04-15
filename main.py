@@ -319,6 +319,71 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
 
 
 # ---------------------------------------------------------------------------
+# Print-again dialog
+# ---------------------------------------------------------------------------
+def _ask_print_again(root: tk.Tk) -> bool:
+    """Show a modal dialog after a passing test asking whether to reprint the label.
+
+    Returns True  → operator clicked "Print Again" (regenerate the CSV)
+    Returns False → operator clicked "Next Device" (reset and continue)
+    """
+    result = {"value": False}
+
+    dlg = tk.Toplevel(root)
+    dlg.title("Label Printed")
+    dlg.resizable(False, False)
+    dlg.grab_set()   # block interaction with the main window until closed
+    dlg.focus_force()
+
+    # Centre the dialog over the main window
+    dlg.update_idletasks()
+    x = root.winfo_x() + (root.winfo_width()  - dlg.winfo_width())  // 2
+    y = root.winfo_y() + (root.winfo_height() - dlg.winfo_height()) // 2
+    dlg.geometry(f"+{x}+{y}")
+
+    tk.Label(
+        dlg,
+        text="Label sent to printer.\n\nDid the label print correctly?",
+        font=("Segoe UI", 11),
+        padx=24, pady=18,
+    ).pack()
+
+    btn_frame = tk.Frame(dlg, pady=12)
+    btn_frame.pack()
+
+    def on_print_again():
+        result["value"] = True
+        dlg.destroy()
+
+    def on_next_device():
+        result["value"] = False
+        dlg.destroy()
+
+    tk.Button(
+        btn_frame, text="Print Again",
+        command=on_print_again,
+        font=("Segoe UI", 10, "bold"),
+        bg="#F44336", fg="white",
+        relief="flat", padx=16, pady=6,
+        cursor="hand2",
+        activebackground="#D32F2F", activeforeground="white",
+    ).pack(side="left", padx=10)
+
+    tk.Button(
+        btn_frame, text="Next Device",
+        command=on_next_device,
+        font=("Segoe UI", 10, "bold"),
+        bg="#1565C0", fg="white",
+        relief="flat", padx=16, pady=6,
+        cursor="hand2",
+        activebackground="#1976D2", activeforeground="white",
+    ).pack(side="left", padx=10)
+
+    root.wait_window(dlg)
+    return result["value"]
+
+
+# ---------------------------------------------------------------------------
 # Bubble widget – coloured circle toggle for PASS / FAIL
 # ---------------------------------------------------------------------------
 class BubbleButton(tk.Canvas):
@@ -843,13 +908,23 @@ class TestApp:
             fg="#2E7D32",
         )
 
-        # Drop the printer CSV; errors here are non-fatal (results are already saved)
-        try:
-            if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None:
+        # Drop the printer CSV only on a fully passing test, then let the
+        # operator reprint as many times as needed before moving on.
+        if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None and not failures:
+            try:
                 _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "")
-        except Exception as exc:
-            messagebox.showerror("CSV Error",
-                                 f"Test results saved, but failed to create CSV file:\n{exc}")
+            except Exception as exc:
+                messagebox.showerror("CSV Error",
+                                     f"Test results saved, but failed to create CSV file:\n{exc}")
+
+            # Keep prompting until the operator confirms the label printed or skips
+            while _ask_print_again(self.root):
+                try:
+                    _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "")
+                except Exception as exc:
+                    messagebox.showerror("CSV Error",
+                                         f"Failed to reprint CSV file:\n{exc}")
+                    break
 
         # Reset all input fields so the operator can immediately test the next unit
         self._sn_var.set("")
