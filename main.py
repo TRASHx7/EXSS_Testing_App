@@ -52,8 +52,19 @@ TOP_MODULE_TESTS = [
     ("Yellow Strobe Light", "yellow_strobe_light"),
 ]
 
-# PCBA shares the same physical test items as the Base Module
-PCBA_TESTS = BASE_MODULE_TESTS
+PCBA_TESTS = [
+    ("LOW Alarm Switch",        "low_alarm_switch"),
+    ("HIGH Alarm Switch",       "high_alarm_switch"),
+    ("Power Switch",            "power_switch"),
+    ("Green LED",               "green_led"),
+    ("Yellow LED",              "yellow_led"),
+    ("Critical Low BAT 00101",  "critical_low_bat_00101"),
+    ("BAT Siren Switch 00000",  "bat_siren_switch_00000"),
+    ("Test Button 11001",       "test_button_11001"),
+    ("Connector A 10011",       "connector_a_10011"),
+    ("LOW Siren Switch 10010",  "low_siren_switch_10010"),
+    ("Connector B 01001",       "connector_b_01001"),
+]
 
 
 # ===========================================================================
@@ -73,6 +84,7 @@ COL_BASE_SN      = "device_sn"         # serial number column
 # --- PCBA test results table ------------------------------------------------
 TBL_PCBA         = "exss_pcba_test"    # stores one row per test run
 COL_PCBA_SN      = "main_pcba"         # PCBA serial number column (e.g. BLN-XXXX-XXXXXXXXRX)
+COL_PCBA_CHARGE  = "charge_current_a"  # measured charge current (float, A)
 COL_PCBA_24V     = "24v0_rail_v"       # measured 24 V rail voltage (float)
 COL_PCBA_3V3     = "3v3_rail_v"        # measured 3.3 V rail voltage (float)
 COL_PCBA_12V     = "12v0_rail_v"       # measured 12 V rail voltage (float)
@@ -85,12 +97,13 @@ TBL_TOP_ASSEMBLY  = "exs_assembly"
 
 # ===========================================================================
 
-# Voltage rails measured for PCBA tests – (display label, db column).
+# Float measurements for PCBA tests – (display label, db column, unit string).
 # Order here controls the order they appear in the Measurements section.
-PCBA_VOLTAGE_RAILS = [
-    ("24V",  COL_PCBA_24V),
-    ("3.3V", COL_PCBA_3V3),
-    ("12V",  COL_PCBA_12V),
+PCBA_MEASUREMENTS = [
+    ("12V Rail",       COL_PCBA_12V,    "V"),
+    ("Charge Current", COL_PCBA_CHARGE, "A"),
+    ("3.3V Rail",      COL_PCBA_3V3,    "V"),
+    ("24V Rail",       COL_PCBA_24V,    "V"),
 ]
 
 # Label for the serial number input field, keyed by unit type
@@ -489,7 +502,7 @@ class FloatInput(tk.Frame):
         super().__init__(parent, **kwargs)
         bg = self.cget("bg")
         tk.Label(self, text=field_label, font=("Segoe UI", 10),
-                 width=12, anchor="w", bg=bg).pack(side="left", padx=4)
+                 width=16, anchor="w", bg=bg).pack(side="left", padx=4)
         tk.Entry(self, textvariable=var, width=10,
                  font=("Segoe UI", 10), justify="right").pack(side="left", padx=4)
         tk.Label(self, text=unit, font=("Segoe UI", 10),
@@ -638,14 +651,12 @@ class TestApp:
 
         elif unit == "PCBA":
             self._build_test_list(PCBA_TESTS)
-            # Create one StringVar per voltage rail, then build the input fields
-            v_vars = {}
-            for _, col in PCBA_VOLTAGE_RAILS:
-                v_vars[col] = tk.StringVar()
-                self._voltage_vars[col] = v_vars[col]
+            # Create one StringVar per measurement field, then build the input fields
+            for _, col, _ in PCBA_MEASUREMENTS:
+                self._voltage_vars[col] = tk.StringVar()
             self._build_extra_floats(
-                [(f"{lbl} Rail:", self._voltage_vars[col], "V")
-                 for lbl, col in PCBA_VOLTAGE_RAILS]
+                [(lbl, self._voltage_vars[col], unit)
+                 for lbl, col, unit in PCBA_MEASUREMENTS]
             )
 
         self._submit_btn.config(state="normal")
@@ -764,18 +775,18 @@ class TestApp:
                                        "Example: BLN-3724-94001026R3")
                 return False
 
-        # All three voltage rails must be present and numeric for PCBA
-        for lbl, col in PCBA_VOLTAGE_RAILS if unit == "PCBA" else []:
+        # All measurement fields must be present and numeric for PCBA
+        for lbl, col, _ in PCBA_MEASUREMENTS if unit == "PCBA" else []:
             val = self._voltage_vars[col].get().strip()
             if not val:
                 messagebox.showwarning("Missing Value",
-                                       f"Please enter a reading for the {lbl} rail.")
+                                       f"Please enter a reading for {lbl}.")
                 return False
             try:
                 float(val)
             except ValueError:
                 messagebox.showwarning("Invalid Value",
-                                       f'"{val}" is not a valid number for the {lbl} rail.')
+                                       f'"{val}" is not a valid number for {lbl}.')
                 return False
 
         # Every test item bubble must have a selection before submitting
@@ -833,22 +844,23 @@ class TestApp:
                     f"Horn Volume  —  {val} dBA  (limits: {lcl} – {ucl} dBA)"
                 )
 
-        # Check each voltage rail against UCL/LCL (PCBA only)
+        # Check each PCBA measurement against UCL/LCL
         if unit == "PCBA" and self._limits.has_section(sec):
             # Maps DB column name → key prefix used in config.ini
             key_map = {
-                COL_PCBA_24V: "24v0_rail_v",
-                COL_PCBA_3V3: "3v3_rail_v",
-                COL_PCBA_12V: "12v0_rail_v",
+                COL_PCBA_CHARGE: "charge_current_a",
+                COL_PCBA_24V:    "24v0_rail_v",
+                COL_PCBA_3V3:    "3v3_rail_v",
+                COL_PCBA_12V:    "12v0_rail_v",
             }
-            for lbl, col in PCBA_VOLTAGE_RAILS:
+            for lbl, col, unit_str in PCBA_MEASUREMENTS:
                 val = float(self._voltage_vars[col].get().strip())
                 k   = key_map.get(col, "")
                 lcl = self._limits.getfloat(sec, f"{k}_lcl", fallback=None)
                 ucl = self._limits.getfloat(sec, f"{k}_ucl", fallback=None)
                 if (lcl is not None and val < lcl) or (ucl is not None and val > ucl):
                     failures.append(
-                        f"{lbl} Rail  —  {val} V  (limits: {lcl} – {ucl} V)"
+                        f"{lbl}  —  {val} {unit_str}  (limits: {lcl} – {ucl} {unit_str})"
                     )
 
         return failures
@@ -1127,13 +1139,13 @@ class TestApp:
                 # No assembly lookup or serial generation needed.
                 cols = ([COL_PCBA_SN]
                         + [col for _, col in PCBA_TESTS]
-                        + [col for _, col in PCBA_VOLTAGE_RAILS]
+                        + [col for _, col, _ in PCBA_MEASUREMENTS]
                         + ["test_result"])
                 vals = ([sn]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in PCBA_TESTS]
                         + [float(self._voltage_vars[col].get().strip())
-                           for _, col in PCBA_VOLTAGE_RAILS]
+                           for _, col, _ in PCBA_MEASUREMENTS]
                         + [overall])
                 _replace_into(cur, TBL_PCBA, cols, vals)
 
