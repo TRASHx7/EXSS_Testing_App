@@ -11,7 +11,7 @@ How it works (high level):
      printer software can pick it up automatically.
 
 Configuration files (located next to the .exe / .py):
-  db_config.ini  – base64-encoded MySQL credentials (created by create_config.py)
+  db_config.ini  – base64-encoded MySQL credentials
   config.ini     – UCL/LCL pass/fail limits for measurements
 """
 import csv
@@ -115,8 +115,10 @@ SN_LABELS = {
 
 # Product IDs in the `product` table – used to pull printer / label info.
 # Update these if the product records are ever recreated with new IDs.
-PRODUCT_ID_BASE = 68   # EXB (Base Module)
-PRODUCT_ID_TOP  = 71   # EXS (Top Module)
+PRODUCT_ID_BASE = 78   # EXB (Base Module)
+PRODUCT_ID_TOP  = 79   # EXS (Top Module)
+
+OPERATOR_OPTIONS = ["PRODUCTION", "ENGINEERING", "TROUBLESHOOTING", "RMA"]
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +247,8 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
       Quantity    – hardcoded to 1 (always print one label per device)
 
     Product IDs used to look up data:
-      Base Module → product_id 68
-      Top Module  → product_id 71
+      Base Module → product_id 78
+      Top Module  → product_id 79
     """
     # Select the product_id for this unit type
     product_id = PRODUCT_ID_BASE if unit == "Base Module" else PRODUCT_ID_TOP
@@ -545,9 +547,10 @@ class TestApp:
         self._limits = load_limits()
 
         # Tkinter variables shared between the UI and submit logic
-        self._unit_var     = tk.StringVar(value="")   # currently selected unit type
-        self._sn_var       = tk.StringVar()            # serial / PCBA number entered by operator
-        self._horn_vol_var = tk.StringVar()            # horn volume reading (Top Module only)
+        self._unit_var     = tk.StringVar(value="")         # currently selected unit type
+        self._sn_var       = tk.StringVar()                 # serial / PCBA number entered by operator
+        self._horn_vol_var = tk.StringVar()                 # horn volume reading (Top Module only)
+        self._operator_var = tk.StringVar(value="PRODUCTION")  # operator type dropdown
 
         # Populated when the content area is built; keyed by DB column name
         self._test_results: dict[str, tk.StringVar] = {}   # PASS/FAIL per test item
@@ -584,6 +587,15 @@ class TestApp:
                 font=("Segoe UI", 11), bg=self._BG,
                 activebackground=self._BG,
             ).pack(side="left", padx=14)
+
+        tk.Frame(sel, bg="#B0BEC5", width=2).pack(side="left", fill="y", padx=20, pady=4)
+        tk.Label(sel, text="Operator:", font=("Segoe UI", 10, "bold"),
+                 bg=self._BG).pack(side="left", padx=(0, 6))
+        ttk.Combobox(
+            sel, textvariable=self._operator_var,
+            values=OPERATOR_OPTIONS, state="readonly",
+            font=("Segoe UI", 10), width=16,
+        ).pack(side="left")
 
         # ── Dynamic content area (rebuilt on unit change) ────────────────
         self._content = tk.Frame(self.root, bg=self._BG)
@@ -1049,11 +1061,11 @@ class TestApp:
 
                 # Write test results row (INSERT; device_id is the primary key so
                 # a duplicate device_id will raise an error – each test run is unique)
-                cols = ["device_id"] + [col for _, col in BASE_MODULE_TESTS] + ["test_result"]
-                vals = ([device_id]
+                cols = ["device_id", "main_pcba"] + [col for _, col in BASE_MODULE_TESTS] + ["test_result", "operator"]
+                vals = ([device_id, pcba_sn]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in BASE_MODULE_TESTS]
-                        + [overall])
+                        + [overall, self._operator_var.get()])
                 _replace_into(cur, TBL_BASE, cols, vals)
 
                 if overall == 1:
@@ -1107,11 +1119,11 @@ class TestApp:
                 horn_vol_str = self._horn_vol_var.get().strip()
                 cols = (["device_id"]
                         + [col for _, col in TOP_MODULE_TESTS]
-                        + [COL_TOP_HORN_VOL, "test_result"])
+                        + [COL_TOP_HORN_VOL, "test_result", "operator"])
                 vals = ([device_id]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in TOP_MODULE_TESTS]
-                        + [float(horn_vol_str), overall])
+                        + [float(horn_vol_str), overall, self._operator_var.get()])
                 _replace_into(cur, TBL_TOP, cols, vals)
 
                 if overall == 1:
@@ -1140,13 +1152,13 @@ class TestApp:
                 cols = ([COL_PCBA_SN]
                         + [col for _, col in PCBA_TESTS]
                         + [col for _, col, _ in PCBA_MEASUREMENTS]
-                        + ["test_result"])
+                        + ["test_result", "operator"])
                 vals = ([sn]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in PCBA_TESTS]
                         + [float(self._voltage_vars[col].get().strip())
                            for _, col, _ in PCBA_MEASUREMENTS]
-                        + [overall])
+                        + [overall, self._operator_var.get()])
                 _replace_into(cur, TBL_PCBA, cols, vals)
 
             conn.commit()
