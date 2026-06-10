@@ -1,7 +1,15 @@
 {
   "permissions": {
     "allow": [
-      "Bash(venv/Scripts/pip install:*)"
+      "Bash(venv/Scripts/pip install:*)",
+      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\main.py\" 2>&1)",
+      "PowerShell(Get-Command python, python3, py -ErrorAction SilentlyContinue)",
+      "PowerShell(py --version 2>&1)",
+      "PowerShell(python --version 2>&1)",
+      "PowerShell(& \"C:\\\\Users\\\\tankhbayar\\\\.local\\\\bin\\\\python3.14.exe\" --version)",
+      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" --version)",
+      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\pip.exe\" install mysql-connector-python)",
+      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\main.py\")"
     ]
   }
 }

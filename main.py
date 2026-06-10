@@ -319,7 +319,7 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
         name,
         description1,
         description2,
-        f"{now.month}/{now.day}/{now.year}",
+        f"{now.year}",
         str(device_id),
         "",          # certification – not used
         "",          # image – not used
