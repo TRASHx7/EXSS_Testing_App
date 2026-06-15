@@ -4,9 +4,10 @@ Records pass/fail test results for Base Module, Top Module, and PCBA devices.
 
 How it works (high level):
   1. The operator selects a unit type (Base Module, Top Module, or PCBA).
-  2. They enter the identifying serial / PCBA number and mark each test PASS or FAIL.
-  3. On submit the results are written to MySQL. If all tests pass and the device
-     has no serial number yet, a new one is generated and stamped in the assembly table.
+  2. They scan the module SN (EXB Base Module SN / EXS Top Module SN) or the
+     PCBA number and mark each test PASS or FAIL.
+  3. On submit the results are written to MySQL. The scanned module SN must
+     already exist in the assembly table; if all tests pass it is used for the label.
   4. For Base Module and Top Module a CSV file is also dropped in S:\\ so the label
      printer software can pick it up automatically.
 
@@ -48,8 +49,8 @@ BASE_MODULE_TESTS = [
 
 TOP_MODULE_TESTS = [
     ("Horn",                "horn"),
-    ("Red Strobe Light",    "red_strobe_light"),
-    ("Yellow Strobe Light", "yellow_strobe_light"),
+    ("Red Strobe Light",    "strobe_1_light"),
+    ("Yellow Strobe Light", "strobe_2_light"),
 ]
 
 PCBA_TESTS = [
@@ -91,7 +92,7 @@ COL_PCBA_12V     = "12v0_rail_v"       # measured 12 V rail voltage (float)
 
 # --- Assembly tables --------------------------------------------------------
 # These track which PCBA / horn was installed in which device and hold the
-# device_sn that gets assigned after a passing test.
+# device_sn (already assigned before testing).
 TBL_BASE_ASSEMBLY = "exb_assembly"
 TBL_TOP_ASSEMBLY  = "exs_assembly"
 
@@ -108,8 +109,8 @@ PCBA_MEASUREMENTS = [
 
 # Label for the serial number input field, keyed by unit type
 SN_LABELS = {
-    "Base Module": "Main PCBA S/N",      # operator scans the PCBA barcode
-    "Top Module":  "Horn Serial Number", # operator scans the horn barcode
+    "Base Module": "EXB Base Module SN", # operator scans the base module SN barcode
+    "Top Module":  "EXS Top Module SN",  # operator scans the top module SN barcode
     "PCBA":        "Main PCBA S/N",
 }
 
@@ -902,7 +903,7 @@ class TestApp:
         try:
             assigned_serial, device_id = self._save_to_db()
         except ValueError as exc:
-            # Raised when the serial / horn number doesn't exist in the assembly table
+            # Raised when the scanned module SN doesn't exist in the assembly table
             messagebox.showerror("Assembly Lookup Error", str(exc))
             return
         except mysql.connector.Error as exc:
@@ -923,7 +924,7 @@ class TestApp:
                 messagebox.showinfo(
                     "Saved",
                     f"Test results saved successfully!\n\n"
-                    f"Assigned Serial Number:  {assigned_serial}",
+                    f"Serial Number:  {assigned_serial}",
                 )
             else:
                 messagebox.showinfo("Saved", "Test results saved successfully!")
@@ -960,66 +961,23 @@ class TestApp:
             var.set("")
 
     # ------------------------------------------------------------------
-    # Serial number generation
-    # ------------------------------------------------------------------
-    def _next_serial(self, cursor, unit: str, material_code: str) -> str:
-        """Generate the next sequential serial number for this unit and year.
-
-        Serial number format:
-          Base Module:  EXB{material}{yy}{sssss}   e.g. EXBA2500100
-          Top Module:   EXS{material}{yy}{sssss}   e.g. EXSA2500100
-
-          {material} – single letter from the assembly table (e.g. 'A')
-          {yy}       – two-digit year (e.g. '25' for 2025)
-          {sssss}    – five-digit zero-padded sequence number, minimum 00100
-
-        The sequence is shared across all material codes for the same year,
-        so 'A' and 'B' units are numbered from the same pool. This is achieved
-        by using the '_' wildcard when querying the max sequence.
-
-        The sequence resets to 00100 at the start of each calendar year.
-        """
-        yy = datetime.now().strftime("%y")
-
-        if unit == "Base Module":
-            type_prefix, sn_col, table = "EXB", "device_sn", TBL_BASE_ASSEMBLY
-        else:
-            type_prefix, sn_col, table = "EXS", "device_sn", TBL_TOP_ASSEMBLY
-
-        # Find the highest existing sequence number for this unit type and year.
-        # '_' matches any single character (the material letter) in LIKE syntax.
-        cursor.execute(
-            f"SELECT MAX(CAST(RIGHT(`{sn_col}`, 5) AS UNSIGNED)) "
-            f"FROM `{table}` "
-            f"WHERE `{sn_col}` LIKE %s AND LENGTH(`{sn_col}`) = 11",
-            (f"{type_prefix}_{yy}%",),
-        )
-        row = cursor.fetchone()
-        # Seed at 99 so the first generated number is 00100
-        last_seq = row[0] if row and row[0] is not None else 99
-        next_seq = max(last_seq + 1, 100)
-        return f"{type_prefix}{material_code}{yy}{next_seq:05d}"
-
-    # ------------------------------------------------------------------
     # Database write  –  one INSERT per unit type
     # ------------------------------------------------------------------
     def _save_to_db(self) -> tuple[str | None, int | None]:
-        """Write test results to the database and assign a serial number if the test passed.
+        """Write test results to the database.
 
         Returns:
           (assigned_serial, device_id)
             assigned_serial – the device serial number string, or None for PCBA / failures
             device_id       – the internal device_id, or None for PCBA
 
-        Raises ValueError if the operator-entered serial number is not found in
+        Raises ValueError if the operator-scanned module SN is not found in
         the assembly table (e.g. a typo). The whole transaction is rolled back.
 
         Serial number logic (Base Module and Top Module only):
-          • If the assembly row already has a device_sn, reuse it (the device was
-            tested before and is being retested).
-          • If there is no device_sn yet (first passing test), generate a new one
-            with _next_serial() and write it back to the assembly table.
-          • On a failed test, no serial is assigned and device_sn is left unchanged.
+          • The operator scans the module SN (device_sn); it must already exist
+            in the assembly table. On a passing test it is used for the label CSV.
+          • On a failed test, no serial is returned.
         """
         conn = mysql.connector.connect(**self._db_config)
         assigned_serial    = None
@@ -1034,54 +992,34 @@ class TestApp:
 
             # ── Base Module ──────────────────────────────────────────────
             if unit == "Base Module":
-                pcba_sn = sn   # operator scanned the PCBA barcode
+                device_sn = sn   # operator scanned the EXB Base Module SN barcode
 
-                # Find the latest assembly record for this PCBA.
-                # ORDER BY device_id DESC ensures we get the most recent entry
-                # in case the PCBA was used in more than one device over time.
+                # Find the latest assembly record for this device SN.
+                # ORDER BY device_id DESC ensures we get the most recent entry.
                 cur.execute(
-                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_BASE_ASSEMBLY}` "
-                    f"WHERE `main_pcba` = %s ORDER BY `device_id` DESC LIMIT 1",
-                    (pcba_sn,),
+                    f"SELECT `device_id` FROM `{TBL_BASE_ASSEMBLY}` "
+                    f"WHERE `device_sn` = %s ORDER BY `device_id` DESC LIMIT 1",
+                    (device_sn,),
                 )
                 asm_row = cur.fetchone()
                 if not asm_row:
                     raise ValueError(
-                        f"PCBA serial '{pcba_sn}' was not found in {TBL_BASE_ASSEMBLY}.\n"
-                        "Please check the PCBA serial number."
+                        f"Base Module SN '{device_sn}' was not found in {TBL_BASE_ASSEMBLY}.\n"
+                        "Please check the EXB Base Module SN."
                     )
-                device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                device_id = asm_row[0]
                 assigned_device_id = device_id   # returned to caller for CSV writing
 
-                if not material_code:
-                    raise ValueError(
-                        f"No material is set for PCBA serial '{pcba_sn}' in {TBL_BASE_ASSEMBLY}.\n"
-                        "Please set the material before submitting test results."
-                    )
-
-                # Write test results row (INSERT; device_id is the primary key so
-                # a duplicate device_id will raise an error – each test run is unique)
-                cols = ["device_id", "main_pcba"] + [col for _, col in BASE_MODULE_TESTS] + ["test_result", "operator"]
-                vals = ([device_id, pcba_sn]
+                # Write test results row. exb_test_id is the auto-increment primary
+                # key, so each submit appends a new test run for this device_id.
+                cols = ["device_id"] + [col for _, col in BASE_MODULE_TESTS] + ["test_result", "operator"]
+                vals = ([device_id]
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in BASE_MODULE_TESTS]
                         + [overall, self._operator_var.get()])
                 _replace_into(cur, TBL_BASE, cols, vals)
 
                 if overall == 1:
-                    # Reuse existing serial if already assigned; otherwise generate a new one
-                    if existing_sn:
-                        serial = existing_sn
-                    else:
-                        serial = self._next_serial(cur, unit, material_code)
-                        # Stamp the new serial on the specific assembly row (by device_id,
-                        # not by PCBA serial, so only the latest row is updated)
-                        cur.execute(
-                            f"UPDATE `{TBL_BASE_ASSEMBLY}` "
-                            f"SET `device_sn` = %s, `date_modified` = NOW() "
-                            f"WHERE `device_id` = %s",
-                            (serial, device_id),
-                        )
                     # Record manufacture date in the device table
                     cur.execute(
                         "UPDATE `device` "
@@ -1089,32 +1027,26 @@ class TestApp:
                         "WHERE `device_id` = %s",
                         (device_id,),
                     )
-                    assigned_serial = serial
+                    assigned_serial = device_sn
 
             # ── Top Module ───────────────────────────────────────────────
             elif unit == "Top Module":
-                horn_sn = sn   # operator scanned the horn barcode
+                device_sn = sn   # operator scanned the EXS Top Module SN barcode
 
-                # Find the latest assembly record for this horn serial number
+                # Find the latest assembly record for this device SN
                 cur.execute(
-                    f"SELECT `device_id`, `material`, `device_sn` FROM `{TBL_TOP_ASSEMBLY}` "
-                    f"WHERE `horn_sn` = %s ORDER BY `device_id` DESC LIMIT 1",
-                    (horn_sn,),
+                    f"SELECT `device_id` FROM `{TBL_TOP_ASSEMBLY}` "
+                    f"WHERE `device_sn` = %s ORDER BY `device_id` DESC LIMIT 1",
+                    (device_sn,),
                 )
                 asm_row = cur.fetchone()
                 if not asm_row:
                     raise ValueError(
-                        f"Horn serial '{horn_sn}' was not found in {TBL_TOP_ASSEMBLY}.\n"
-                        "Please check the horn serial number."
+                        f"Top Module SN '{device_sn}' was not found in {TBL_TOP_ASSEMBLY}.\n"
+                        "Please check the EXS Top Module SN."
                     )
-                device_id, material_code, existing_sn = asm_row[0], asm_row[1], asm_row[2]
+                device_id = asm_row[0]
                 assigned_device_id = device_id   # returned to caller for CSV writing
-
-                if not material_code:
-                    raise ValueError(
-                        f"No material is set for horn serial '{horn_sn}' in {TBL_TOP_ASSEMBLY}.\n"
-                        "Please set the material before submitting test results."
-                    )
 
                 horn_vol_str = self._horn_vol_var.get().strip()
                 cols = (["device_id"]
@@ -1127,23 +1059,13 @@ class TestApp:
                 _replace_into(cur, TBL_TOP, cols, vals)
 
                 if overall == 1:
-                    if existing_sn:
-                        serial = existing_sn
-                    else:
-                        serial = self._next_serial(cur, unit, material_code)
-                        cur.execute(
-                            f"UPDATE `{TBL_TOP_ASSEMBLY}` "
-                            f"SET `device_sn` = %s, `date_modified` = NOW() "
-                            f"WHERE `device_id` = %s",
-                            (serial, device_id),
-                        )
                     cur.execute(
                         "UPDATE `device` "
                         "SET `date_of_manufacture` = NOW() "
                         "WHERE `device_id` = %s",
                         (device_id,),
                     )
-                    assigned_serial = serial
+                    assigned_serial = device_sn
 
             # ── PCBA ─────────────────────────────────────────────────────
             elif unit == "PCBA":

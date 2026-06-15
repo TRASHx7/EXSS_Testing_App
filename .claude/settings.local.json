@@ -9,7 +9,9 @@
       "PowerShell(& \"C:\\\\Users\\\\tankhbayar\\\\.local\\\\bin\\\\python3.14.exe\" --version)",
       "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" --version)",
       "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\pip.exe\" install mysql-connector-python)",
-      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\main.py\")"
+      "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\main.py\")",
+      "PowerShell(python -m py_compile main.py)",
+      "PowerShell(if \\($?\\) { \"OK\" })"
     ]
   }
 }
