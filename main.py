@@ -49,8 +49,8 @@ BASE_MODULE_TESTS = [
 
 TOP_MODULE_TESTS = [
     ("Horn",                "horn"),
-    ("Red Strobe Light",    "strobe_1_light"),
-    ("Yellow Strobe Light", "strobe_2_light"),
+    ("Strobe 1 Light",      "strobe_1_light"),
+    ("Strobe 2 Light",      "strobe_2_light"),
 ]
 
 PCBA_TESTS = [
@@ -201,6 +201,56 @@ def _to_tinyint(val: str):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Scanned serial-number parsing (EXS / EXB modules)
+# ---------------------------------------------------------------------------
+# The operator scans the contract-manufacturer QR label into the SN box. That
+# barcode packs several fields separated by tabs:
+#
+#     SN <delim> MC <delim> CC1 <delim> CC2 <delim> XX
+#
+# where MC/CC1/CC2/XX are component identifiers this app doesn't use. Only the
+# device SN – the leading "EX…" token – is needed here; everything from the
+# first separator onward is discarded. The separator is a tab, but depending on
+# the scanner it may arrive as a real tab character or as the literal two
+# characters "\t". Since the SN is always letters and digits only, we take the
+# leading run of letters/digits, which is robust to either form (and to a bare
+# SN with no trailing fields).
+#
+# The SN follows the EXSS serialization scheme:  EXMFfyyssssss
+#     EX      constant prefix
+#     M       module:        S = Top (siren/strobe),  B = Base
+#     F       steel finish:  S = stainless,  P = painted   <-- label "model" value
+#     f       factory location (single char, defined in the database)
+#     yy      2-digit year code
+#     ssssss  6-digit serial, starting at 001000 and resetting each year
+
+
+def _device_sn_from_scan(scanned: str) -> str:
+    """Return the device SN from a scanned module barcode/QR.
+
+    The scan may be the full contract-manufacturer barcode (the SN followed by
+    tab-separated component fields). The SN is the leading run of letters and
+    digits, so this works whether the separator is a real tab or the literal
+    characters "\\t", and whether or not any trailing fields are present.
+    """
+    match = re.match(r"[A-Za-z0-9]+", scanned.strip())
+    return match.group(0) if match else scanned.strip()
+
+
+def _steel_finish_from_sn(device_sn: str) -> str:
+    """Return the steel-finish code ('S' or 'P') encoded in an EXSS serial.
+
+    The finish is the 4th character (F) of EXMFfyyssssss. Returns '' if the SN
+    is too short or that character isn't a recognised finish code.
+    """
+    if len(device_sn) >= 4 and device_sn[:2].upper() == "EX":
+        finish = device_sn[3].upper()
+        if finish in ("S", "P"):
+            return finish
+    return ""
+
+
 def _replace_into(cursor, table: str, columns: list, values: list):
     """Execute an INSERT INTO statement for the given table.
 
@@ -228,24 +278,25 @@ def _csv_file_name(unit: str) -> str:
     return f"{prefix}{now.strftime('%Y%m%d%H%M%S')}{hundredths:02d}.csv"
 
 
-def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: str = "") -> None:
+def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: str = "", model: str = "") -> None:
     """Write a label-printer CSV to S:\\ after a successful test.
 
     The label printer software (running on the printer PC) watches S:\\ and
     picks up any new CSV files automatically. Each CSV has exactly one data row.
 
     Columns written:
-      deviceSN    – the newly assigned device serial number
-      name        – product.current_hw_model  (e.g. "EXB-A")
-      description1– product.model_description (human-readable product name)
-      description2– left blank (reserved for future use)
-      date        – today's date in M/D/YYYY format
-      deviceID    – the internal device_id from the device table
-      certification– blank (not currently used)
-      image       – blank (not currently used)
-      Label       – printer_config.label_file_name (.lab template filename)
-      Printer     – printer_config.printer_name (name of the label printer)
-      Quantity    – hardcoded to 1 (always print one label per device)
+      deviceSN      – the newly assigned device serial number
+      name          – product.current_hw_model  
+      model         – the material/finish on the metal frame, as EXSS-P (painted steel) or EXSS-S (stainless steel)
+      description1  – product.model_description (human-readable product name)
+      description2  – left blank (reserved for future use)
+      year          – today's date in YYYY format
+      deviceID      – the internal device_id from the device table
+      certification – blank (not currently used)
+      image         – blank (not currently used)
+      Label         – printer_config.label_file_name (.lab template filename)
+      Printer       – printer_config.printer_name (name of the label printer)
+      Quantity      – hardcoded to 1 (always print one label per device)
 
     Product IDs used to look up data:
       Base Module → product_id 78
@@ -304,9 +355,10 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
     headers = [
         "deviceSN",
         "name",
+        "model",
         "description1",
         "description2",
-        "date",
+        "year",
         "deviceID",
         "certification",
         "image",
@@ -314,10 +366,14 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
         "Printer",
         "Quantity",
     ]
+    # Steel finish ("P"/"S") becomes the model label "EXSS-P"/"EXSS-S"; blank if unknown
+    model_label = f"EXSS-{model}" if model else ""
+
     now = datetime.now()
     csv_row = [
         device_sn,
         name,
+        model_label,
         description1,
         description2,
         f"{now.year}",
@@ -575,6 +631,18 @@ class TestApp:
                  font=("Segoe UI", 14, "bold"),
                  bg=self._HEADER_BG, fg="white").pack(expand=True)
 
+        # Database indicator – shows which host/schema the app is writing to so
+        # the operator can confirm they're pointed at the right server (e.g.
+        # production vs. a test database). Placed top-right so it doesn't shift
+        # the centred title. Falls back to "not loaded" if the config failed.
+        if self._db_config:
+            db_text = f"DB: {self._db_config['host']} / {self._db_config['database']}"
+        else:
+            db_text = "DB: not loaded"
+        tk.Label(hdr, text=db_text, font=("Segoe UI", 9, "bold"),
+                 bg=self._HEADER_BG, fg="#BBDEFB").place(
+                     relx=1.0, rely=0.5, anchor="e", x=-16)
+
         # ── Unit type selector ───────────────────────────────────────────
         sel = tk.LabelFrame(self.root, text="  Select Unit Type  ",
                             font=("Segoe UI", 10, "bold"),
@@ -681,8 +749,24 @@ class TestApp:
         sn_frame.pack(fill="x", pady=(0, 6))
         tk.Label(sn_frame, text=label, font=("Segoe UI", 10, "bold"),
                  bg=self._BG, width=18, anchor="w").pack(side="left", padx=(0, 6))
-        tk.Entry(sn_frame, textvariable=self._sn_var, width=26,
-                 font=("Segoe UI", 10)).pack(side="left")
+        entry = tk.Entry(sn_frame, textvariable=self._sn_var, width=26,
+                         font=("Segoe UI", 10))
+        entry.pack(side="left")
+
+        # For Base/Top the operator scans the contract-manufacturer QR, which
+        # packs the SN plus component fields. Strip it down to just the SN in the
+        # box once the scan finishes – scanners send Enter (<Return>); <FocusOut>
+        # covers the case where focus moves on before that.
+        if self._unit_var.get() in ("Base Module", "Top Module"):
+            entry.bind("<Return>",   self._trim_sn_to_serial)
+            entry.bind("<FocusOut>", self._trim_sn_to_serial)
+
+    def _trim_sn_to_serial(self, _event=None):
+        """Collapse a scanned module QR string in the SN box down to just the SN."""
+        raw = self._sn_var.get()
+        sn  = _device_sn_from_scan(raw)
+        if sn != raw:
+            self._sn_var.set(sn)
 
     def _build_extra_floats(self, fields: list):
         """Build the Measurements section with one FloatInput per field.
@@ -763,6 +847,20 @@ class TestApp:
             return False
 
         unit = self._unit_var.get()
+
+        # Base / Top modules are identified by a scanned EXSS serial number. The
+        # steel-finish code (the 4th character) drives the "model" value on the
+        # printed label, so make sure we can read it before going any further.
+        if unit in ("Base Module", "Top Module"):
+            device_sn = _device_sn_from_scan(self._sn_var.get())
+            if not _steel_finish_from_sn(device_sn):
+                messagebox.showwarning(
+                    "Invalid Module S/N",
+                    f'Could not read the steel finish from "{device_sn}".\n\n'
+                    "Expected an EXSS serial like EXSP125001000, where the 4th "
+                    "character is the finish (S = stainless, P = painted).\n\n"
+                    "Please re-scan the module QR code.")
+                return False
 
         # Horn volume must be present and numeric for Top Module
         if unit == "Top Module":
@@ -901,7 +999,7 @@ class TestApp:
             return
 
         try:
-            assigned_serial, device_id = self._save_to_db()
+            assigned_serial, device_id, finish = self._save_to_db()
         except ValueError as exc:
             # Raised when the scanned module SN doesn't exist in the assembly table
             messagebox.showerror("Assembly Lookup Error", str(exc))
@@ -938,7 +1036,7 @@ class TestApp:
         # operator reprint as many times as needed before moving on.
         if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None and not failures:
             try:
-                _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "")
+                _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "", finish)
             except Exception as exc:
                 messagebox.showerror("CSV Error",
                                      f"Test results saved, but failed to create CSV file:\n{exc}")
@@ -946,7 +1044,7 @@ class TestApp:
             # Keep prompting until the operator confirms the label printed or skips
             while _ask_print_again(self.root):
                 try:
-                    _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "")
+                    _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "", finish)
                 except Exception as exc:
                     messagebox.showerror("CSV Error",
                                          f"Failed to reprint CSV file:\n{exc}")
@@ -963,13 +1061,14 @@ class TestApp:
     # ------------------------------------------------------------------
     # Database write  –  one INSERT per unit type
     # ------------------------------------------------------------------
-    def _save_to_db(self) -> tuple[str | None, int | None]:
+    def _save_to_db(self) -> tuple[str | None, int | None, str]:
         """Write test results to the database.
 
         Returns:
-          (assigned_serial, device_id)
+          (assigned_serial, device_id, finish)
             assigned_serial – the device serial number string, or None for PCBA / failures
             device_id       – the internal device_id, or None for PCBA
+            finish          – steel-finish code 'S'/'P' for the label, or '' (PCBA)
 
         Raises ValueError if the operator-scanned module SN is not found in
         the assembly table (e.g. a typo). The whole transaction is rolled back.
@@ -982,6 +1081,7 @@ class TestApp:
         conn = mysql.connector.connect(**self._db_config)
         assigned_serial    = None
         assigned_device_id = None
+        finish             = ""    # steel finish (S/P) parsed from the module SN
         try:
             cur  = conn.cursor(buffered=True)
             unit = self._unit_var.get()
@@ -992,7 +1092,10 @@ class TestApp:
 
             # ── Base Module ──────────────────────────────────────────────
             if unit == "Base Module":
-                device_sn = sn   # operator scanned the EXB Base Module SN barcode
+                # The scan may be the full contract-manufacturer barcode; keep
+                # only the first field as the SN and read the steel finish from it.
+                device_sn = _device_sn_from_scan(sn)
+                finish    = _steel_finish_from_sn(device_sn)
 
                 # Find the latest assembly record for this device SN.
                 # ORDER BY device_id DESC ensures we get the most recent entry.
@@ -1031,7 +1134,10 @@ class TestApp:
 
             # ── Top Module ───────────────────────────────────────────────
             elif unit == "Top Module":
-                device_sn = sn   # operator scanned the EXS Top Module SN barcode
+                # Same as Base: strip any component fields off the scan and read
+                # the steel finish from the SN.
+                device_sn = _device_sn_from_scan(sn)
+                finish    = _steel_finish_from_sn(device_sn)
 
                 # Find the latest assembly record for this device SN
                 cur.execute(
@@ -1084,7 +1190,7 @@ class TestApp:
                 _replace_into(cur, TBL_PCBA, cols, vals)
 
             conn.commit()
-            return assigned_serial, assigned_device_id
+            return assigned_serial, assigned_device_id, finish
 
         except Exception:
             conn.rollback()
