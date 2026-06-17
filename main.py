@@ -143,12 +143,13 @@ def load_db_config() -> dict:
     """Read db_config.ini, decode the base64 payload, and return MySQL kwargs.
 
     The file is base64-encoded so that credentials are not stored as plain text.
-    Use create_config.py --encode to regenerate it if the password changes.
+    It is prepared manually outside this project and copied into the app folder
+    (next to the .exe / .py); replace that file to change the credentials.
     """
     if not os.path.exists(CONFIG_FILE):
         raise FileNotFoundError(
             f"Database config not found: {CONFIG_FILE}\n"
-            "Run  create_config.py --encode  to create it."
+            "Copy the base64-encoded db_config.ini into this folder."
         )
     with open(CONFIG_FILE, "r") as fh:
         encoded = fh.read().strip()
@@ -251,7 +252,7 @@ def _steel_finish_from_sn(device_sn: str) -> str:
     return ""
 
 
-def _replace_into(cursor, table: str, columns: list, values: list):
+def _insert_into(cursor, table: str, columns: list, values: list):
     """Execute an INSERT INTO statement for the given table.
 
     Column and table names are backtick-quoted to safely handle reserved words.
@@ -268,7 +269,7 @@ def _replace_into(cursor, table: str, columns: list, values: list):
 def _csv_file_name(unit: str) -> str:
     """Generate a unique CSV filename based on unit type and current timestamp.
 
-    Format:  EXB20250409143022050.csv  (EXB/EXS + YYYYmmddHHMMSShh)
+    Format:  EXB2025040914302205.csv  (EXB/EXS + YYYYmmddHHMMSS + 2-digit hundredths)
     The two-digit hundredths suffix makes collisions extremely unlikely even
     if two units finish testing within the same second.
     """
@@ -995,7 +996,7 @@ class TestApp:
         if not self._db_config:
             messagebox.showerror("No Config",
                                  "Database configuration is not loaded.\n"
-                                 "Run create_config.py --encode first.")
+                                 "Copy the base64-encoded db_config.ini into this folder.")
             return
 
         try:
@@ -1120,7 +1121,7 @@ class TestApp:
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in BASE_MODULE_TESTS]
                         + [overall, self._operator_var.get()])
-                _replace_into(cur, TBL_BASE, cols, vals)
+                _insert_into(cur, TBL_BASE, cols, vals)
 
                 if overall == 1:
                     # Record manufacture date in the device table
@@ -1162,7 +1163,7 @@ class TestApp:
                         + [_to_tinyint(self._test_results[col].get())
                            for _, col in TOP_MODULE_TESTS]
                         + [float(horn_vol_str), overall, self._operator_var.get()])
-                _replace_into(cur, TBL_TOP, cols, vals)
+                _insert_into(cur, TBL_TOP, cols, vals)
 
                 if overall == 1:
                     cur.execute(
@@ -1187,7 +1188,7 @@ class TestApp:
                         + [float(self._voltage_vars[col].get().strip())
                            for _, col, _ in PCBA_MEASUREMENTS]
                         + [overall, self._operator_var.get()])
-                _replace_into(cur, TBL_PCBA, cols, vals)
+                _insert_into(cur, TBL_PCBA, cols, vals)
 
             conn.commit()
             return assigned_serial, assigned_device_id, finish
