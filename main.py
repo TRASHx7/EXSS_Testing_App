@@ -8,8 +8,9 @@ How it works (high level):
      PCBA number and mark each test PASS or FAIL.
   3. On submit the results are written to MySQL. The scanned module SN must
      already exist in the assembly table; if all tests pass it is used for the label.
-  4. For Base Module and Top Module a CSV file is also dropped in S:\\ so the label
-     printer software can pick it up automatically.
+  4. For the Base Module a CSV file is also dropped in S:\\ so the label
+     printer software can pick it up automatically. The Top Module (EXS) is
+     not labelled here.
 
 Configuration files (located next to the .exe / .py):
   db_config.ini  – base64-encoded MySQL credentials
@@ -282,8 +283,10 @@ def _csv_file_name(unit: str) -> str:
 def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: str = "", model: str = "") -> None:
     """Write a label-printer CSV to S:\\ after a successful test.
 
-    The label printer software (running on the printer PC) watches S:\\ and
-    picks up any new CSV files automatically. Each CSV has exactly one data row.
+    Only called for the Base Module (EXB) – the Top Module (EXS) is not
+    labelled. The label printer software (running on the printer PC) watches
+    S:\\ and picks up any new CSV files automatically. Each CSV has exactly
+    one data row.
 
     Columns written:
       deviceSN      – the newly assigned device serial number
@@ -987,7 +990,7 @@ class TestApp:
           1. Validate all inputs (abort on error).
           2. Write results to the database and get back the assigned serial + device_id.
           3. Show success / failure summary to the operator.
-          4. Write the printer CSV to S:\\ (Base Module and Top Module only).
+          4. Write the printer CSV to S:\\ (Base Module only).
           5. Reset all input fields so the next unit can be tested immediately.
         """
         if not self._validate():
@@ -1035,7 +1038,9 @@ class TestApp:
 
         # Drop the printer CSV only on a fully passing test, then let the
         # operator reprint as many times as needed before moving on.
-        if self._unit_var.get() in ("Base Module", "Top Module") and device_id is not None and not failures:
+        # Only the Base Module (EXB) gets a cert label CSV; the Top Module (EXS)
+        # is not labelled here.
+        if self._unit_var.get() == "Base Module" and device_id is not None and not failures:
             try:
                 _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "", finish)
             except Exception as exc:
