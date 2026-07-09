@@ -1,9 +1,11 @@
 """
 EXSS Device Test Recording System
-Records pass/fail test results for Base Module, Top Module, and PCBA devices.
+Records pass/fail test results for Base Module, Top Module, PCBA, and
+Charge Dock devices.
 
 How it works (high level):
-  1. The operator selects a unit type (Base Module, Top Module, or PCBA).
+  1. The operator selects a unit type (Base Module, Top Module, PCBA, or
+     Charge Dock).
   2. They scan the module SN (EXB Base Module SN / EXS Top Module SN) or the
      PCBA number and mark each test PASS or FAIL.
   3. On submit the results are written to MySQL. The scanned module SN must
@@ -68,6 +70,20 @@ PCBA_TESTS = [
     ("Connector B 01001",       "connector_b_01001"),
 ]
 
+CHARGE_DOCK_TESTS = [
+    ("Charge Test", "charge_test"),
+]
+
+# Maps unit type -> its PASS/FAIL test list. Used by validation, failure
+# collection, and the DB write so they share one source of truth instead of
+# repeating the same if/elif chain (and its easy-to-miss fallback).
+UNIT_TESTS = {
+    "Base Module": BASE_MODULE_TESTS,
+    "Top Module":  TOP_MODULE_TESTS,
+    "PCBA":        PCBA_TESTS,
+    "Charge Dock": CHARGE_DOCK_TESTS,
+}
+
 
 # ===========================================================================
 # DATABASE SCHEMA CONFIGURATION
@@ -91,11 +107,31 @@ COL_PCBA_24V     = "24v0_rail_v"       # measured 24 V rail voltage (float)
 COL_PCBA_3V3     = "3v3_rail_v"        # measured 3.3 V rail voltage (float)
 COL_PCBA_12V     = "12v0_rail_v"       # measured 12 V rail voltage (float)
 
+# --- Charge Dock (CHRG) test results table ----------------------------------
+TBL_CHRG          = "chrg_test"         # stores one row per test run (keyed by device_id)
+
 # --- Assembly tables --------------------------------------------------------
 # These track which PCBA / horn was installed in which device and hold the
 # device_sn (already assigned before testing).
 TBL_BASE_ASSEMBLY = "exb_assembly"
 TBL_TOP_ASSEMBLY  = "exs_assembly"
+
+# Charge Dock assembly maps the scanned Main PCBA S/N -> a pre-assigned
+# device_id. The device_id is read to key the charge test row; on a passing
+# test the generated device serial is written back into this table.
+TBL_CHRG_ASSEMBLY = "chrg_assembly"
+COL_CHRG_ASM_PCBA = "main_pcba"         # PCBA serial column the operator scans
+
+# Charge Dock serial-number scheme:  CHRG f yy ssssss   (e.g. CHRG126001000)
+#     CHRG    4-char model code (constant)
+#     f       factory location (single char); "1" = Calgary
+#     yy      2-digit year code
+#     ssssss  6-digit serial, starting at 001000 and resetting each calendar year
+# This is the same layout as the EXSS/EXB device_sn (factory + year + serial);
+# only the leading 4-char model code differs (EXB's EX+module+finish -> "CHRG").
+CHRG_SN_PREFIX    = "CHRG"
+CHRG_FACTORY_CODE = "1"     # 1 = Calgary
+CHRG_SERIAL_START = 1000    # first serial each year -> "001000"
 
 # ===========================================================================
 
@@ -113,12 +149,21 @@ SN_LABELS = {
     "Base Module": "EXB Base Module SN", # operator scans the base module SN barcode
     "Top Module":  "EXS Top Module SN",  # operator scans the top module SN barcode
     "PCBA":        "Main PCBA S/N",
+    "Charge Dock": "Main PCBA S/N",      # operator scans the PCBA SN; looked up in chrg_assembly
 }
 
-# Product IDs in the `product` table – used to pull printer / label info.
-# Update these if the product records are ever recreated with new IDs.
-PRODUCT_ID_BASE = 78   # EXB (Base Module)
-PRODUCT_ID_TOP  = 79   # EXS (Top Module)
+# Product IDs in the `product` table – used to pull printer / label info for
+# the label CSV. Update these if the product records are ever recreated with
+# new IDs.
+PRODUCT_ID_BASE = 78     # EXB (Base Module)
+PRODUCT_ID_CHRG = None   # Charge Dock – TODO: set once the product record exists
+
+# Units that generate a label-printer CSV, mapped to (product_id, filename
+# prefix). The Top Module (EXS) is intentionally absent – it is not labelled.
+CSV_UNITS = {
+    "Base Module": (PRODUCT_ID_BASE, "EXB"),
+    "Charge Dock": (PRODUCT_ID_CHRG, "CHRG"),
+}
 
 OPERATOR_OPTIONS = ["PRODUCTION", "ENGINEERING", "TROUBLESHOOTING", "RMA"]
 
@@ -253,6 +298,38 @@ def _steel_finish_from_sn(device_sn: str) -> str:
     return ""
 
 
+def _next_charge_dock_serial(cur, factory: str = CHRG_FACTORY_CODE) -> str:
+    """Return the next Charge Dock device serial, e.g. CHRG126001000.
+
+    Format: CHRG + factory + 2-digit year + 6-digit sequence. The sequence
+    starts at 001000 and resets each calendar year – because the year is baked
+    into the prefix, scoping the lookup to that prefix gives the reset for free
+    (a new year simply has no matching rows yet, so it restarts at 001000).
+
+    The next value is the highest existing serial for this prefix + 1. All
+    serials share the same fixed-width prefix and 6-digit zero-padded suffix, so
+    a lexicographic MAX() is equivalent to a numeric one.
+    """
+    year_code = datetime.now().year % 100
+    prefix    = f"{CHRG_SN_PREFIX}{factory}{year_code:02d}"   # e.g. CHRG126
+
+    cur.execute(
+        f"SELECT MAX(`device_sn`) FROM `{TBL_CHRG_ASSEMBLY}` "
+        f"WHERE `device_sn` LIKE %s",
+        (prefix + "%",),
+    )
+    row  = cur.fetchone()
+    last = row[0] if row and row[0] else None
+
+    suffix = last[len(prefix):len(prefix) + 6] if last else ""
+    if len(suffix) == 6 and suffix.isdigit():
+        seq = int(suffix) + 1
+    else:
+        seq = CHRG_SERIAL_START
+
+    return f"{prefix}{seq:06d}"
+
+
 def _insert_into(cursor, table: str, columns: list, values: list):
     """Execute an INSERT INTO statement for the given table.
 
@@ -270,11 +347,12 @@ def _insert_into(cursor, table: str, columns: list, values: list):
 def _csv_file_name(unit: str) -> str:
     """Generate a unique CSV filename based on unit type and current timestamp.
 
-    Format:  EXB2025040914302205.csv  (EXB/EXS + YYYYmmddHHMMSS + 2-digit hundredths)
-    The two-digit hundredths suffix makes collisions extremely unlikely even
-    if two units finish testing within the same second.
+    Format:  EXB2025040914302205.csv  (prefix + YYYYmmddHHMMSS + 2-digit
+    hundredths). The prefix is EXB for the Base Module and CHRG for the Charge
+    Dock. The two-digit hundredths suffix makes collisions extremely unlikely
+    even if two units finish testing within the same second.
     """
-    prefix = "EXB" if unit == "Base Module" else "EXS"
+    prefix = CSV_UNITS[unit][1]
     now = datetime.now()
     hundredths = now.microsecond // 10000
     return f"{prefix}{now.strftime('%Y%m%d%H%M%S')}{hundredths:02d}.csv"
@@ -283,10 +361,10 @@ def _csv_file_name(unit: str) -> str:
 def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: str = "", model: str = "") -> None:
     """Write a label-printer CSV to S:\\ after a successful test.
 
-    Only called for the Base Module (EXB) – the Top Module (EXS) is not
-    labelled. The label printer software (running on the printer PC) watches
-    S:\\ and picks up any new CSV files automatically. Each CSV has exactly
-    one data row.
+    Called for units that carry a printed label – currently the Base Module
+    (EXB) and the Charge Dock (CHRG). The Top Module (EXS) is not labelled. The
+    label printer software (running on the printer PC) watches S:\\ and picks up
+    any new CSV files automatically. Each CSV has exactly one data row.
 
     Columns written:
       deviceSN      – the newly assigned device serial number
@@ -304,48 +382,54 @@ def _write_printer_csv(unit: str, device_id: int, db_config: dict, device_sn: st
 
     Product IDs used to look up data:
       Base Module → product_id 78
-      Top Module  → product_id 79
+      Charge Dock → PRODUCT_ID_CHRG (still to be assigned)
+
+    NOTE: The Charge Dock label column format is still being finalised; for now
+    it reuses the Base Module columns below.
     """
     # Select the product_id for this unit type
-    product_id = PRODUCT_ID_BASE if unit == "Base Module" else PRODUCT_ID_TOP
+    product_id = CSV_UNITS[unit][0]
 
     name = ""
     description1 = ""
     printer = ""
     label = ""
 
-    # Open a short-lived connection just for the two lookup queries
-    conn = mysql.connector.connect(**db_config)
-    try:
-        cur = conn.cursor(buffered=True)
+    # Look up product + printer info. Skipped until the unit has a product_id
+    # (e.g. the Charge Dock), in which case these fields stay blank.
+    if product_id is not None:
+        # Open a short-lived connection just for the two lookup queries
+        conn = mysql.connector.connect(**db_config)
+        try:
+            cur = conn.cursor(buffered=True)
 
-        # Pull the hardware model and description from the product table
-        cur.execute(
-            "SELECT `current_hw_model`, `model_description` "
-            "FROM `product` "
-            "WHERE `product_id` = %s "
-            "LIMIT 1",
-            (product_id,),
-        )
-        row = cur.fetchone()
-        if row:
-            name         = row[0] or ""
-            description1 = row[1] or ""
+            # Pull the hardware model and description from the product table
+            cur.execute(
+                "SELECT `current_hw_model`, `model_description` "
+                "FROM `product` "
+                "WHERE `product_id` = %s "
+                "LIMIT 1",
+                (product_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                name         = row[0] or ""
+                description1 = row[1] or ""
 
-        # Pull the printer name and label template filename from printer_config
-        cur.execute(
-            "SELECT `printer_name`, `label_file_name` "
-            "FROM `printer_config` "
-            "WHERE `product_id` = %s "
-            "LIMIT 1",
-            (product_id,),
-        )
-        row = cur.fetchone()
-        if row:
-            printer = row[0] or ""
-            label   = row[1] or ""
-    finally:
-        conn.close()
+            # Pull the printer name and label template filename from printer_config
+            cur.execute(
+                "SELECT `printer_name`, `label_file_name` "
+                "FROM `printer_config` "
+                "WHERE `product_id` = %s "
+                "LIMIT 1",
+                (product_id,),
+            )
+            row = cur.fetchone()
+            if row:
+                printer = row[0] or ""
+                label   = row[1] or ""
+        finally:
+            conn.close()
 
     description2 = ""   # reserved column – leave blank
 
@@ -580,7 +664,7 @@ class TestApp:
 
     Layout (top to bottom):
       Header bar     – title
-      Unit selector  – radio buttons: Base Module / Top Module / PCBA
+      Unit selector  – radio buttons: Base Module / Top Module / PCBA / Charge Dock
       Content area   – rebuilt each time the operator selects a unit type
       Status bar     – save timestamp (left) + Submit button (right)
     """
@@ -653,7 +737,7 @@ class TestApp:
                             bg=self._BG, padx=12, pady=8)
         sel.pack(fill="x", padx=20, pady=(12, 4))
 
-        for unit in ("Base Module", "Top Module", "PCBA"):
+        for unit in ("Base Module", "Top Module", "PCBA", "Charge Dock"):
             tk.Radiobutton(
                 sel, text=unit, variable=self._unit_var, value=unit,
                 command=self._on_unit_select,   # rebuilds the content area
@@ -743,6 +827,10 @@ class TestApp:
                 [(lbl, self._voltage_vars[col], unit)
                  for lbl, col, unit in PCBA_MEASUREMENTS]
             )
+
+        elif unit == "Charge Dock":
+            # Single PASS/FAIL test, no extra measurements
+            self._build_test_list(CHARGE_DOCK_TESTS)
 
         self._submit_btn.config(state="normal")
         self._status_lbl.config(text="")
@@ -880,8 +968,9 @@ class TestApp:
                                        f'"{val}" is not a valid number for Horn Volume.')
                 return False
 
-        # PCBA serial numbers must match the Blackline format: BLN-XXXX-XXXXXXXXRX
-        if unit == "PCBA":
+        # PCBA and Charge Dock are both keyed off the scanned Main PCBA S/N,
+        # which must match the Blackline format: BLN-XXXX-XXXXXXXXRX
+        if unit in ("PCBA", "Charge Dock"):
             pcba_sn = self._sn_var.get().strip()
             if not re.fullmatch(r"BLN-\d{4}-\d{8}R\d+", pcba_sn):
                 messagebox.showwarning("Invalid S/N",
@@ -905,14 +994,7 @@ class TestApp:
                 return False
 
         # Every test item bubble must have a selection before submitting
-        if unit == "Base Module":
-            test_list = BASE_MODULE_TESTS
-        elif unit == "Top Module":
-            test_list = TOP_MODULE_TESTS
-        else:
-            test_list = PCBA_TESTS
-
-        for label, col in test_list:
+        for label, col in UNIT_TESTS[unit]:
             if not self._test_results[col].get():
                 messagebox.showwarning("Incomplete",
                                        f"Please select PASS or FAIL for:\n{label}")
@@ -936,31 +1018,27 @@ class TestApp:
         unit = self._unit_var.get()
 
         # Collect any bubbles explicitly marked FAIL
-        if unit == "Base Module":
-            test_list = BASE_MODULE_TESTS
-        elif unit == "Top Module":
-            test_list = TOP_MODULE_TESTS
-        else:
-            test_list = PCBA_TESTS
-
-        for label, col in test_list:
+        for label, col in UNIT_TESTS[unit]:
             if self._test_results[col].get() == "FAIL":
                 failures.append(f"{label}  —  FAIL")
 
-        sec = "limits"   # section name in config.ini
+        # config.ini is split into two limit sections: [exs limits] holds the
+        # Top Module (EXS) limits, [exb limits] holds the base/PCBA (EXB) limits.
+        exs_sec = "exs limits"
+        exb_sec = "exb limits"
 
         # Check horn volume against UCL/LCL (Top Module only)
-        if unit == "Top Module" and self._limits.has_section(sec):
+        if unit == "Top Module" and self._limits.has_section(exs_sec):
             val = float(self._horn_vol_var.get().strip())
-            lcl = self._limits.getfloat(sec, "horn_volume__dba_lcl", fallback=None)
-            ucl = self._limits.getfloat(sec, "horn_volume__dba_ucl", fallback=None)
+            lcl = self._limits.getfloat(exs_sec, "horn_volume__dba_lcl", fallback=None)
+            ucl = self._limits.getfloat(exs_sec, "horn_volume__dba_ucl", fallback=None)
             if (lcl is not None and val < lcl) or (ucl is not None and val > ucl):
                 failures.append(
                     f"Horn Volume  —  {val} dBA  (limits: {lcl} – {ucl} dBA)"
                 )
 
         # Check each PCBA measurement against UCL/LCL
-        if unit == "PCBA" and self._limits.has_section(sec):
+        if unit == "PCBA" and self._limits.has_section(exb_sec):
             # Maps DB column name → key prefix used in config.ini
             key_map = {
                 COL_PCBA_CHARGE: "charge_current_a",
@@ -971,8 +1049,8 @@ class TestApp:
             for lbl, col, unit_str in PCBA_MEASUREMENTS:
                 val = float(self._voltage_vars[col].get().strip())
                 k   = key_map.get(col, "")
-                lcl = self._limits.getfloat(sec, f"{k}_lcl", fallback=None)
-                ucl = self._limits.getfloat(sec, f"{k}_ucl", fallback=None)
+                lcl = self._limits.getfloat(exb_sec, f"{k}_lcl", fallback=None)
+                ucl = self._limits.getfloat(exb_sec, f"{k}_ucl", fallback=None)
                 if (lcl is not None and val < lcl) or (ucl is not None and val > ucl):
                     failures.append(
                         f"{lbl}  —  {val} {unit_str}  (limits: {lcl} – {ucl} {unit_str})"
@@ -1037,10 +1115,10 @@ class TestApp:
         )
 
         # Drop the printer CSV only on a fully passing test, then let the
-        # operator reprint as many times as needed before moving on.
-        # Only the Base Module (EXB) gets a cert label CSV; the Top Module (EXS)
-        # is not labelled here.
-        if self._unit_var.get() == "Base Module" and device_id is not None and not failures:
+        # operator reprint as many times as needed before moving on. Only the
+        # Base Module (EXB) and Charge Dock (CHRG) are labelled; the Top Module
+        # (EXS) is not.
+        if self._unit_var.get() in CSV_UNITS and device_id is not None and not failures:
             try:
                 _write_printer_csv(self._unit_var.get(), device_id, self._db_config, assigned_serial or "", finish)
             except Exception as exc:
@@ -1194,6 +1272,70 @@ class TestApp:
                            for _, col, _ in PCBA_MEASUREMENTS]
                         + [overall, self._operator_var.get()])
                 _insert_into(cur, TBL_PCBA, cols, vals)
+
+            # ── Charge Dock ──────────────────────────────────────────────
+            elif unit == "Charge Dock":
+                # The operator scans the Main PCBA S/N; look it up in the
+                # charge-dock assembly table to find the device_id (and current
+                # device_sn) already created for this unit, then key the test
+                # row by that device_id.
+                cur.execute(
+                    f"SELECT `device_id`, `device_sn` FROM `{TBL_CHRG_ASSEMBLY}` "
+                    f"WHERE `{COL_CHRG_ASM_PCBA}` = %s ORDER BY `device_id` DESC LIMIT 1",
+                    (sn,),
+                )
+                asm_row = cur.fetchone()
+                if not asm_row:
+                    raise ValueError(
+                        f"Main PCBA S/N '{sn}' was not found in {TBL_CHRG_ASSEMBLY}.\n"
+                        "Please check the scanned PCBA serial number."
+                    )
+                device_id, current_sn = asm_row[0], asm_row[1]
+                assigned_device_id = device_id   # returned to caller for CSV writing
+
+                cols = (["device_id"]
+                        + [col for _, col in CHARGE_DOCK_TESTS]
+                        + ["test_result", "operator"])
+                vals = ([device_id]
+                        + [_to_tinyint(self._test_results[col].get())
+                           for _, col in CHARGE_DOCK_TESTS]
+                        + [overall, self._operator_var.get()])
+                _insert_into(cur, TBL_CHRG, cols, vals)
+
+                if overall == 1:
+                    # Record manufacture date, just like the EXB / EXS modules
+                    cur.execute(
+                        "UPDATE `device` "
+                        "SET `date_of_manufacture` = NOW() "
+                        "WHERE `device_id` = %s",
+                        (device_id,),
+                    )
+
+                    # Assign the device serial and write it back into the
+                    # assembly row. If this dock was already given a CHRG serial
+                    # (e.g. a retest), keep it rather than burning a new number;
+                    # otherwise generate the next one for this factory/year.
+                    if current_sn and re.fullmatch(r"CHRG\d{9}", current_sn):
+                        assigned_serial = current_sn
+                    else:
+                        assigned_serial = _next_charge_dock_serial(cur)
+                        # Key the update on device_id + the scanned PCBA S/N –
+                        # the two values we already matched in the SELECT above.
+                        # Keying on the current device_sn instead would miss the
+                        # row whenever that placeholder is NULL or empty (a
+                        # `... = NULL` comparison never matches in SQL).
+                        cur.execute(
+                            f"UPDATE `{TBL_CHRG_ASSEMBLY}` "
+                            f"SET `device_sn` = %s, `date_of_assembly` = NOW() "
+                            f"WHERE `device_id` = %s AND `{COL_CHRG_ASM_PCBA}` = %s",
+                            (assigned_serial, device_id, sn),
+                        )
+                        if cur.rowcount == 0:
+                            raise ValueError(
+                                f"Could not write the generated serial "
+                                f"'{assigned_serial}' back to {TBL_CHRG_ASSEMBLY} "
+                                f"for PCBA '{sn}' (no matching assembly row)."
+                            )
 
             conn.commit()
             return assigned_serial, assigned_device_id, finish

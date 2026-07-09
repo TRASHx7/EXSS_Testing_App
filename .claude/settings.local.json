@@ -11,7 +11,8 @@
       "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\pip.exe\" install mysql-connector-python)",
       "PowerShell(& \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\venv\\\\Scripts\\\\python.exe\" \"c:\\\\Users\\\\tankhbayar\\\\OneDrive - Blackline Safety\\\\Desktop\\\\EXSS_Test\\\\main.py\")",
       "PowerShell(python -m py_compile main.py)",
-      "PowerShell(if \\($?\\) { \"OK\" })"
+      "PowerShell(if \\($?\\) { \"OK\" })",
+      "Bash(python -m py_compile main.py)"
     ]
   }
 }
